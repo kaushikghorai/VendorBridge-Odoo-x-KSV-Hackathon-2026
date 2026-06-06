@@ -1,0 +1,384 @@
+"use client";
+
+/**
+ * Direct Actions Section Component
+ * 
+ * Embeddable component for dashboards to display CC, DC, and PO records
+ * Can be integrated into any dashboard layout
+ */
+
+import { useState, useMemo, useRef } from "react";
+import { useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Plus } from "lucide-react";
+import { DirectActionsFilters } from "./shared/direct-actions-filters";
+import { DirectActionsTable } from "./shared/direct-actions-table";
+import { combineDirectActions, filterDirectActions, sortByDate } from "./shared";
+import type { DirectActionFilters, DirectActionItem } from "./shared/types";
+import { CostComparisonDialog } from "@/components/purchase/cost-comparison-dialog";
+import { DirectCCSetupDialog } from "@/components/purchase/direct-cc-setup-dialog";
+import { DirectDeliveryDialog } from "@/components/purchase/direct-delivery-dialog";
+import { PDFPreviewDialog } from "@/components/purchase/pdf-preview-dialog";
+import { ClientWrapper } from "@/components/ui/client-wrapper";
+import type { Id } from "@/convex/_generated/dataModel";
+import { toast } from "sonner";
+import { useMutation } from "convex/react";
+
+interface DirectActionsSectionProps {
+  showHeader?: boolean;
+  showCreateButton?: boolean;
+  compact?: boolean;
+}
+
+export function DirectActionsSection({
+  showHeader = true,
+  showCreateButton = true,
+  compact = false,
+}: DirectActionsSectionProps) {
+  // Filters state
+  const [filters, setFilters] = useState<DirectActionFilters>({
+    entityType: "all",
+    actionType: "all",
+    searchQuery: "",
+  });
+
+  // Dialog states
+  const [ccDialogOpen, setCCDialogOpen] = useState(false);
+  const [directCCSetupOpen, setDirectCCSetupOpen] = useState(false);
+  const [directDeliveryOpen, setDirectDeliveryOpen] = useState(false);
+  const [editingDirectDCId, setEditingDirectDCId] = useState<Id<"deliveries"> | null>(null);
+  const [poPreviewOpen, setPoPreviewOpen] = useState(false);
+  const [selectedPONumber, setSelectedPONumber] = useState<string | null>(null);
+  const [selectedCCRequestId, setSelectedCCRequestId] = useState<Id<"requests"> | null>(null);
+  const [selectedCCRequestIds, setSelectedCCRequestIds] = useState<Id<"requests">[]>([]);
+  const [resetEditingState, setResetEditingState] = useState<(() => void) | null>(null);
+  const [dcPreviewOpen, setDCPreviewOpen] = useState(false);
+  const [selectedDCId, setSelectedDCId] = useState<Id<"deliveries"> | null>(null);
+
+  // Fetch data
+  const costComparisons = useQuery(api.costComparisons.getAllCostComparisons, {});
+  const purchaseOrders = useQuery(api.purchaseOrders.getAllPurchaseOrders, {});
+  const deliveries = useQuery(api.deliveries.getAllDeliveries, {});
+
+  // Mutations
+  const updateCCTitle = useMutation(api.costComparisons.updateCostComparisonTitle);
+  const updatePOTitle = useMutation(api.purchaseOrders.updatePurchaseOrderTitle);
+  const updateDCTitle = useMutation(api.deliveries.updateDeliveryTitle);
+
+  // Transform and combine data
+  const allItems = useMemo(() => {
+    if (!costComparisons || !purchaseOrders || !deliveries) {
+      return [];
+    }
+
+    const combined = combineDirectActions(
+      costComparisons as any[],
+      purchaseOrders as any[],
+      deliveries as any[]
+    );
+
+    return sortByDate(combined);
+  }, [costComparisons, purchaseOrders, deliveries]);
+
+  // Apply filters
+  const filteredItems = useMemo(() => {
+    return filterDirectActions(allItems, filters);
+  }, [allItems, filters]);
+
+  const isLoading = !costComparisons || !purchaseOrders || !deliveries;
+
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+  const PAGE_SIZE = 10;
+  const totalPages = Math.ceil(filteredItems.length / PAGE_SIZE);
+  const paginatedItems = filteredItems.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+
+  // Reset to page 1 when filters change
+  const prevFiltersRef = useRef(filters);
+  if (prevFiltersRef.current !== filters) {
+    prevFiltersRef.current = filters;
+    if (currentPage !== 1) setCurrentPage(1);
+  }
+
+  const handleEditItem = (item: DirectActionItem, resetCallback: () => void) => {
+    setResetEditingState(() => resetCallback);
+
+    switch (item.type) {
+      case "cc": {
+        // Use item.requestId first; fall back to rawData.requestId (for direct CCs)
+        const reqId = item.mergedRequestIds?.[0] ?? item.requestId ?? (item.rawData as any)?.requestId;
+        if (reqId) {
+          setSelectedCCRequestId(reqId);
+          setSelectedCCRequestIds(item.mergedRequestIds ?? []);
+          setCCDialogOpen(true);
+        } else {
+          // Truly direct CC with no request — open the DirectCC setup dialog
+          setDirectCCSetupOpen(true);
+          resetCallback();
+        }
+        break;
+      }
+      case "dc":
+        // For direct DCs, open the Direct Delivery dialog in edit mode
+        if (item.id) {
+          setEditingDirectDCId(item.id as Id<"deliveries">);
+          setDirectDeliveryOpen(true);
+        }
+        break;
+      case "po":
+        // PO is never editable as per specification
+        resetCallback();
+        break;
+    }
+  };
+
+  const handleViewItem = (item: DirectActionItem) => {
+    switch (item.type) {
+      case "cc":
+        // Open CC in read-only viewer - use CostComparisonDialog in preview mode
+        if (item.mergedRequestIds && item.mergedRequestIds.length > 1) {
+          // Merged CC: open with all request IDs
+          setSelectedCCRequestId(item.mergedRequestIds[0]);
+          setSelectedCCRequestIds(item.mergedRequestIds);
+          setCCDialogOpen(true);
+        } else if (item.requestId) {
+          setSelectedCCRequestId(item.requestId);
+          setSelectedCCRequestIds([]);
+          setCCDialogOpen(true);
+        }
+        break;
+      case "dc":
+        // Open DC in read-only viewer
+        if (item.id) {
+          setSelectedDCId(item.id as Id<"deliveries">);
+          setDCPreviewOpen(true);
+        }
+        break;
+      case "po":
+        // Open PO in the standard view/print format (same as "Approved Requests" sidebar)
+        handleViewPO(item);
+        break;
+    }
+  };
+
+
+  const handleViewPO = (item: DirectActionItem) => {
+    // Extract PO number from the raw data
+    const poNumber = (item.rawData as any)?.poNumber || item.displayId;
+    setSelectedPONumber(poNumber);
+    setPoPreviewOpen(true);
+  };
+
+  const handleViewDC = (deliveryId: Id<"deliveries">) => {
+    // Transition from edit form to view modal
+    setSelectedDCId(deliveryId);
+    setDCPreviewOpen(true);
+  };
+
+  const handleCreateCC = () => {
+    // Open the pre-step dialog to collect item details
+    setDirectCCSetupOpen(true);
+  };
+
+  const handleCreateDirectDelivery = () => {
+    // Open the direct delivery dialog (Mirror protocol - no selection step)
+    setDirectDeliveryOpen(true);
+  };
+
+  const handleCCDialogClose = (open: boolean) => {
+    setCCDialogOpen(open);
+    if (!open) {
+      resetEditingState?.();
+      setResetEditingState(null);
+    }
+  };
+
+  const handleUpdateTitle = async (itemId: string, title: string) => {
+    const item = allItems.find(i => i.id === itemId);
+    if (!item) return;
+
+    try {
+      switch (item.type) {
+        case "cc":
+          await updateCCTitle({ ccId: itemId as Id<"costComparisons">, title });
+          break;
+        case "po":
+          await updatePOTitle({ poId: itemId as Id<"purchaseOrders">, title });
+          break;
+        case "dc":
+          await updateDCTitle({ deliveryId: itemId as Id<"deliveries">, title });
+          break;
+      }
+    } catch (error: any) {
+      toast.error(error.message || "Failed to update title");
+    }
+  };
+
+  return (
+    <>
+      <div className="rounded-2xl border bg-card overflow-hidden">
+        {showHeader && (
+          <div className="flex items-center justify-between px-5 py-4 border-b bg-muted/30">
+            <div>
+              <h3 className="text-sm font-semibold">Direct Actions</h3>
+              <p className="text-[11px] text-muted-foreground mt-0.5">Manage Cost Comparisons, Delivery Challans &amp; Purchase Orders</p>
+            </div>
+            {showCreateButton && (
+              <ClientWrapper fallback={<Button size="sm" disabled>Loading...</Button>}>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button size="sm" className="gap-1.5 h-8 text-xs">
+                      <Plus className="h-3.5 w-3.5" />
+                      Create
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-52">
+                    <DropdownMenuItem onClick={handleCreateCC} className="gap-2 cursor-pointer py-2.5">
+                      <div>
+                        <div className="font-medium text-sm">Cost Comparison</div>
+                        <div className="text-xs text-muted-foreground">Compare vendor quotes</div>
+                      </div>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleCreateDirectDelivery} className="gap-2 cursor-pointer py-2.5">
+                      <div>
+                        <div className="font-medium text-sm">Direct Delivery</div>
+                        <div className="text-xs text-muted-foreground">Create dispatch record</div>
+                      </div>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </ClientWrapper>
+            )}
+          </div>
+        )}
+
+        <div className="p-4 space-y-4">
+          {/* Filters */}
+          <DirectActionsFilters filters={filters} onFiltersChange={setFilters} />
+
+          {/* Table */}
+          <DirectActionsTable
+            items={paginatedItems}
+            isLoading={isLoading}
+            onEdit={handleEditItem}
+            onView={handleViewItem}
+            onUpdateTitle={handleUpdateTitle}
+            emptyMessage={
+              filters.searchQuery
+                ? "No results found for your search"
+                : "No records found"
+            }
+          />
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between pt-2 border-t">
+              <span className="text-xs text-muted-foreground">
+                {filteredItems.length} total · Page {currentPage} of {totalPages}
+              </span>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                >
+                  ← Prev
+                </Button>
+                {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                  // Show pages around current
+                  let page: number;
+                  if (totalPages <= 5) {
+                    page = i + 1;
+                  } else if (currentPage <= 3) {
+                    page = i + 1;
+                  } else if (currentPage >= totalPages - 2) {
+                    page = totalPages - 4 + i;
+                  } else {
+                    page = currentPage - 2 + i;
+                  }
+                  return (
+                    <Button
+                      key={page}
+                      variant={currentPage === page ? "default" : "outline"}
+                      size="sm"
+                      className="h-7 w-7 p-0 text-xs"
+                      onClick={() => setCurrentPage(page)}
+                    >
+                      {page}
+                    </Button>
+                  );
+                })}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                >
+                  Next →
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Dialogs */}
+      <ClientWrapper>
+        {ccDialogOpen && selectedCCRequestId && (
+          <CostComparisonDialog
+            open={ccDialogOpen}
+            onOpenChange={handleCCDialogClose}
+            requestId={selectedCCRequestId}
+            requestIds={selectedCCRequestIds.length > 1 ? selectedCCRequestIds : undefined}
+          />
+        )}
+
+        <DirectCCSetupDialog
+          open={directCCSetupOpen}
+          onOpenChange={setDirectCCSetupOpen}
+        />
+
+        <DirectDeliveryDialog
+          open={directDeliveryOpen}
+          onOpenChange={(open) => {
+            setDirectDeliveryOpen(open);
+            if (!open) {
+              setEditingDirectDCId(null);
+            }
+          }}
+          editingDeliveryId={editingDirectDCId}
+          onViewDC={handleViewDC}
+          onSuccess={() => {
+            // Refresh data after successful creation/update
+            allItems; // Trigger re-fetch
+          }}
+        />
+
+        <PDFPreviewDialog
+          open={poPreviewOpen}
+          onOpenChange={setPoPreviewOpen}
+          poNumber={selectedPONumber}
+          type="po"
+        />
+
+        <PDFPreviewDialog
+          open={dcPreviewOpen}
+          onOpenChange={setDCPreviewOpen}
+          deliveryId={selectedDCId ? String(selectedDCId) : null}
+          type="dc"
+        />
+      </ClientWrapper>
+    </>
+  );
+}
